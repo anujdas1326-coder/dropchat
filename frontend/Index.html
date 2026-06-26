@@ -681,7 +681,7 @@
 // ═══════════════════════════════════════════════════════
 //  CONFIG
 // ═══════════════════════════════════════════════════════
-const API = 'https://dropchat-fhoe.onrender.com';
+const API = 'https://dropchat-fhoe.onrender.com/api';
 const SOCKET_URL = 'https://dropchat-fhoe.onrender.com';
 const EMOJIS = ['👍','❤️','😂','😮','😢','🔥','🎉','👎'];
 const ROOM_COLORS = ['#7c6af7','#f472b6','#4ade80','#fbbf24','#60a5fa','#f87171','#a78bfa','#34d399'];
@@ -831,251 +831,95 @@ function connectSocket() {
     scrollToBottom();
   });
 
-  socket.on('reaction_updated', ({ messageId, reactions }) => {
-    const pillContainer = document.getElementById(`reactions-${messageId}`);
-    if (!pillContainer) return;
-
-    pillContainer.innerHTML = '';
-    Object.entries(reactions).forEach(([emoji, userIds]) => {
-      if (!userIds || userIds.length === 0) return;
-      
-      const hasReacted = userIds.includes(currentUser.id);
-      const pill = document.createElement('div');
-      pill.className = `reaction-pill ${hasReacted ? 'reacted' : ''}`;
-      pill.onclick = () => socket.emit('toggle_reaction', { roomId: currentRoom._id, messageId, emoji });
-      pill.innerHTML = `<span>${emoji}</span> <span class="count">${userIds.length}</span>`;
-      pillContainer.appendChild(pill);
-    });
+  socket.on('reaction_update', ({ messageId, reactions }) => {
+    updateMessageReactions(messageId, reactions);
   });
 
-  socket.on('online_users', (userIds) => {
-    onlineUsersInRoom = new Set(userIds);
-    renderOnlinePanel();
-  });
-
-  socket.on('user_typing', ({ userId, displayName }) => {
-    if (userId === currentUser.id) return;
-    if (typingUsers.has(userId)) clearTimeout(typingUsers.get(userId));
-
-    typingUsers.set(userId, setTimeout(() => {
-      typingUsers.delete(userId);
-      renderTypingIndicator();
-    }, 3000));
-
-    renderTypingIndicator(displayName);
-  });
-
-  socket.on('user_stop_typing', ({ userId }) => {
-    if (typingUsers.has(userId)) {
-      clearTimeout(typingUsers.get(userId));
-      typingUsers.delete(userId);
+  socket.on('typing_status', ({ username, isTyping: userTyping }) => {
+    if (username === currentUser.username) return;
+    if (userTyping) {
+      typingUsers.set(username, Date.now());
+    } else {
+      typingUsers.delete(username);
     }
     renderTypingIndicator();
+  });
+
+  socket.on('room_users', (users) => {
+    onlineUsersInRoom = new Set(users);
+    renderOnlinePanel();
   });
 }
 
 // ═══════════════════════════════════════════════════════
-//  CHAT ACTIONS & DOM MANIPULATION
+//  CHAT FUNCTIONS
 // ═══════════════════════════════════════════════════════
 async function openRoom(roomId) {
-  try {
-    const res = await api(`/rooms/${roomId}`);
-    currentRoom = res.room;
-    
-    document.getElementById('welcome-screen').style.display = 'none';
-    document.getElementById('chat-area').style.display = 'flex';
-    document.getElementById('ch-name').textContent = currentRoom.name;
-    document.getElementById('ch-room-id').textContent = `Room ID: ${currentRoom._id}`;
-    
-    renderRoomList();
-    socket.emit('join_room', { roomId: currentRoom._id });
-    renderOnlinePanel();
-  } catch (e) {
-    toast(e.message, 'error');
+  if (currentRoom?._id === roomId) return;
+  
+  if (currentRoom) {
+    socket.emit('leave_room', { roomId: currentRoom._id });
   }
+
+  const room = myRooms.find(r => r._id === roomId);
+  if (!room) return;
+
+  currentRoom = room;
+  renderRoomList();
+
+  document.getElementById('welcome-screen').style.display = 'none';
+  document.getElementById('chat-area').style.display = 'flex';
+  document.getElementById('ch-name').textContent = room.name;
+  document.getElementById('ch-room-id').textContent = `ID: ${room._id}`;
+
+  socket.emit('join_room', { roomId });
+  typingUsers.clear();
+  renderTypingIndicator();
 }
 
 function appendMessage(msg) {
   const body = document.getElementById('chat-body');
-  const isOwn = msg.userId === currentUser.id;
-  
-  const group = document.createElement('div');
-  group.className = 'msg-group';
-  
+  const isOwn = msg.sender._id === currentUser.id || msg.sender === currentUser.id;
+  const senderName = msg.sender.displayName || msg.sender.username || 'User';
+  const senderId = msg.sender._id || msg.sender;
   const timeStr = new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-  group.innerHTML = `
-    <div class="avatar msg-avatar" style="background:${userColor(msg.userId)}">${(msg.displayName || msg.username)[0].toUpperCase()}</div>
+  const msgGroup = document.createElement('div');
+  msgGroup.className = `msg-group ${isOwn ? 'own' : ''}`;
+  msgGroup.setAttribute('data-msg-id', msg._id);
+
+  msgGroup.innerHTML = `
+    <div class="msg-avatar" style="background:${userColor(senderId)}">${senderName[0].toUpperCase()}</div>
     <div class="msg-content">
       <div class="msg-header">
-        <span class="msg-sender">${esc(msg.displayName || msg.username)}</span>
+        <span class="msg-sender">${esc(senderName)}</span>
         <span class="msg-time">${timeStr}</span>
       </div>
       <div class="msg-bubble ${isOwn ? 'own' : ''}">
-        <div>${esc(msg.text)}</div>
+        ${esc(msg.content)}
         <div class="msg-actions">
-          <span class="msg-react-btn" onclick="toggleEmojiPicker(event, '${msg._id}')">😀</span>
-          <div class="emoji-picker" id="picker-${msg._id}">
-            ${EMOJIS.map(e => `<span class="emoji-btn" onclick="sendReaction('${msg._id}', '${e}')">${e}</span>`).join('')}
-          </div>
+          <button class="msg-react-btn" onclick="toggleEmojiPicker(event, '${msg._id}')">😀</button>
         </div>
-        <div class="msg-reactions" id="reactions-${msg._id}"></div>
       </div>
+      <div class="msg-reactions" id="reactions-${msg._id}"></div>
     </div>
   `;
-  
-  body.appendChild(group);
-  
-  if (msg.reactions) {
-    socket.emit('toggle_reaction', { roomId: currentRoom._id, messageId: msg._id, emoji: null });
-  }
+
+  body.appendChild(msgGroup);
+  if (msg.reactions) updateMessageReactions(msg._id, msg.reactions);
 }
 
 function sendMessage() {
   const input = document.getElementById('msg-input');
-  const text = input.value.trim();
-  if (!text || !currentRoom) return;
+  const content = input.value.trim();
+  if (!content || !currentRoom) return;
 
-  socket.emit('send_message', { roomId: currentRoom._id, text });
+  socket.emit('send_message', { roomId: currentRoom._id, content });
   input.value = '';
   input.rows = 1;
-  stopTyping();
+  sendTyping(false);
 }
 
-function sendReaction(messageId, emoji) {
-  socket.emit('toggle_reaction', { roomId: currentRoom._id, messageId, emoji });
-  document.getElementById(`picker-${messageId}`).classList.remove('open');
-}
-
-// ═══════════════════════════════════════════════════════
-//  TYPING CONTROLLER
-// ═══════════════════════════════════════════════════════
-function handleTyping() {
-  if (!isTyping && currentRoom) {
-    isTyping = true;
-    socket.emit('typing_start', { roomId: currentRoom._id });
-  }
-  
-  clearTimeout(typingTimer);
-  typingTimer = setTimeout(stopTyping, 2000);
-}
-
-function stopTyping() {
-  if (isTyping && currentRoom) {
-    isTyping = false;
-    socket.emit('typing_stop', { roomId: currentRoom._id });
-  }
-}
-
-function renderTypingIndicator(name = null) {
-  const el = document.getElementById('typing-indicator');
-  if (name) {
-    el.innerHTML = `
-      <div class="typing-dots"><span></span><span></span><span></span></div>
-      <span>${esc(name)} is typing...</span>
-    `;
-  } else {
-    el.innerHTML = '';
-  }
-}
-
-// ═══════════════════════════════════════════════════════
-//  UI CONTROLS & UTILITIES
-// ═══════════════════════════════════════════════════════
-async function createRoom() {
-  const name = document.getElementById('create-name').value.trim();
-  const description = document.getElementById('create-desc').value.trim();
-  const err = document.getElementById('create-error');
-  if (!name) return err.textContent = 'Room name is required';
-
-  try {
-    const res = await api('/rooms', 'POST', { name, description });
-    closeModal('create-modal');
-    document.getElementById('create-name').value = '';
-    document.getElementById('create-desc').value = '';
-    await loadRooms();
-    openRoom(res.room._id);
-  } catch (e) { err.textContent = e.message; }
-}
-
-async function joinRoom() {
-  const roomId = document.getElementById('join-room-id').value.trim().toUpperCase();
-  const err = document.getElementById('join-error');
-  if (!roomId) return err.textContent = 'Room ID is required';
-
-  try {
-    await api('/rooms/join', 'POST', { roomId });
-    closeModal('join-modal');
-    document.getElementById('join-room-id').value = '';
-    await loadRooms();
-    openRoom(roomId);
-  } catch (e) { err.textContent = e.message; }
-}
-
-async function lookupUser() {
-  const uid = document.getElementById('invite-uid-input').value.trim().toUpperCase();
-  const container = document.getElementById('found-user-box');
-  const err = document.getElementById('invite-error');
-  container.innerHTML = '';
-  err.textContent = '';
-
-  if (uid.length !== 8) return err.textContent = 'Enter a valid 8-character ID';
-
-  try {
-    const res = await api(`/users/${uid}`);
-    foundUser = res.user;
-    container.innerHTML = `
-      <div class="found-user">
-        <div class="found-user-info">
-          <div class="fname">${esc(foundUser.displayName || foundUser.username)}</div>
-          <div class="fid">ID: ${foundUser.id}</div>
-        </div>
-        <button class="invite-send-btn" onclick="addFoundUserToRoom()">Add</button>
-      </div>
-    `;
-  } catch (e) { err.textContent = 'User not found'; }
-}
-
-async function addFoundUserToRoom() {
-  if (!foundUser || !currentRoom) return;
-  try {
-    await api('/rooms/join', 'POST', { roomId: currentRoom._id, userId: foundUser.id });
-    toast(`Added ${foundUser.displayName || foundUser.username} successfully!`, 'success');
-    closeModal('invite-modal');
-    openRoom(currentRoom._id);
-  } catch (e) {
-    document.getElementById('invite-error').textContent = e.message;
-  }
-}
-
-function renderOnlinePanel() {
-  const list = document.getElementById('online-list');
-  if (!currentRoom || !currentRoom.members) return;
-
-  list.innerHTML = currentRoom.members.map(member => {
-    const isOnline = onlineUsersInRoom.has(member.id);
-    return `
-      <div class="online-user" style="opacity: ${isOnline ? 1 : 0.4}">
-        <div class="online-dot" style="background: ${isOnline ? 'var(--green)' : 'var(--text3)'}"></div>
-        <div class="user-info">
-          <div class="online-name">${esc(member.displayName || member.username)}</div>
-          <div class="online-id">${member.id}</div>
-        </div>
-      </div>
-    `;
-  }).join('');
-}
-
-function toggleOnlinePanel() {
-  document.getElementById('online-panel').classList.toggle('open');
-}
-
-function toggleEmojiPicker(e, messageId) {
-  e.stopPropagation();
-  document.getElementById(`picker-${messageId}`).classList.toggle('open');
-}
-
-// Back-support if single usage mapped elsewhere
 function handleMsgKey(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
@@ -1083,53 +927,221 @@ function handleMsgKey(e) {
   }
 }
 
-function scrollToBottom() {
-  const body = document.getElementById('chat-body');
-  body.scrollTop = body.scrollHeight;
+// ═══════════════════════════════════════════════════════
+//  REACTIONS & TYPING
+// ═══════════════════════════════════════════════════════
+function toggleEmojiPicker(e, msgId) {
+  e.stopPropagation();
+  let picker = document.getElementById('global-emoji-picker');
+  if (!picker) {
+    picker = document.createElement('div');
+    picker.id = 'global-emoji-picker';
+    picker.className = 'emoji-picker';
+    picker.innerHTML = EMOJIS.map(emo => `<span class="emoji-btn" onclick="reactToMessage('${emo}')">${emo}</span>`).join('');
+    document.body.appendChild(picker);
+  }
+
+  if (picker.style.display === 'flex' && picker.getAttribute('data-target') === msgId) {
+    picker.style.display = 'none';
+    return;
+  }
+
+  picker.setAttribute('data-target', msgId);
+  picker.style.display = 'flex';
+  const rect = e.target.getBoundingClientRect();
+  picker.style.top = `${rect.top - 45 + window.scrollY}px`;
+  picker.style.left = `${rect.left + window.scrollX}px`;
+
+  const closePicker = () => {
+    picker.style.display = 'none';
+    document.removeEventListener('click', closePicker);
+  };
+  setTimeout(() => document.addEventListener('click', closePicker), 50);
 }
 
-function openCreateModal() { openModal('create-modal'); }
-function openJoinModal() { openModal('join-modal'); }
-function openInviteModal() { 
-  if(!currentRoom) return;
-  document.getElementById('inv-room-id').textContent = currentRoom._id;
-  openModal('invite-modal'); 
+function reactToMessage(emoji) {
+  const picker = document.getElementById('global-emoji-picker');
+  const messageId = picker.getAttribute('data-target');
+  if (!messageId || !currentRoom) return;
+  socket.emit('react_message', { roomId: currentRoom._id, messageId, emoji });
 }
 
-function openModal(id) { document.getElementById(id).classList.add('open'); }
-function closeModal(id) { 
-  document.getElementById(id).classList.remove('open'); 
-  if(id === 'invite-modal') {
-    document.getElementById('found-user-box').innerHTML = '';
-    document.getElementById('invite-uid-input').value = '';
+function updateMessageReactions(messageId, reactions) {
+  const container = document.getElementById(`reactions-${messageId}`);
+  if (!container) return;
+
+  const summary = {};
+  reactions.forEach(r => {
+    summary[r.emoji] = summary[r.emoji] || { count: 0, userReacted: false };
+    summary[r.emoji].count++;
+    if (r.user === currentUser.id || r.user?._id === currentUser.id) {
+      summary[r.emoji].userReacted = true;
+    }
+  });
+
+  container.innerHTML = Object.entries(summary).map(([emoji, data]) => `
+    <div class="reaction-pill ${data.userReacted ? 'reacted' : ''}" onclick="event.stopPropagation(); socket.emit('react_message', { roomId: currentRoom._id, messageId: '${messageId}', emoji: '${emoji}' })">
+      <span>${emoji}</span>
+      <span class="count">${data.count}</span>
+    </div>
+  `).join('');
+}
+
+function handleTyping() {
+  if (!isTyping) {
+    isTyping = true;
+    sendTyping(true);
+  }
+  clearTimeout(typingTimer);
+  typingTimer = setTimeout(() => {
+    isTyping = false;
+    sendTyping(false);
+  }, 2000);
+}
+
+function sendTyping(typing) {
+  if (currentRoom && socket) {
+    socket.emit('typing', { roomId: currentRoom._id, isTyping: typing });
   }
 }
 
+// ═══════════════════════════════════════════════════════
+//  TYPING BROADCAST DISPATCHER
+// ═══════════════════════════════════════════════════════
+function renderTypingIndicator() {
+  const el = document.getElementById('typing-indicator');
+  const now = Date.now();
+  for (const [user, ts] of typingUsers.entries()) {
+    if (now - ts > 4000) typingUsers.delete(user);
+  }
+
+  if (typingUsers.size === 0) {
+    el.innerHTML = '';
+    return;
+  }
+
+  const names = Array.from(typingUsers.keys()).join(', ');
+  el.innerHTML = `
+    <div class="typing-dots"><span></span><span></span><span></span></div>
+    <span>${esc(names)} ${typingUsers.size === 1 ? 'is' : 'are'} typing...</span>
+  `;
+}
+
+// ═══════════════════════════════════════════════════════
+//  MODALS & UTILS
+// ═══════════════════════════════════════════════════════
+function openCreateModal() { document.getElementById('create-modal').classList.add('open'); }
+function openJoinModal() { document.getElementById('join-modal').classList.add('open'); }
+function openInviteModal() {
+  if (!currentRoom) return;
+  document.getElementById('inv-room-id').textContent = currentRoom._id;
+  document.getElementById('invite-modal').classList.add('open');
+}
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+  if (id === 'invite-modal') {
+    document.getElementById('found-user-box').innerHTML = '';
+    document.getElementById('invite-uid-input').value = '';
+    foundUser = null;
+  }
+}
+
+async function createRoom() {
+  const name = document.getElementById('create-name').value.trim();
+  const desc = document.getElementById('create-desc').value.trim();
+  const errEl = document.getElementById('create-error');
+  if (!name) return errEl.textContent = 'Room name is required';
+  try {
+    const res = await api('/rooms/create', 'POST', { name, description: desc });
+    closeModal('create-modal');
+    toast('Room created successfully!', 'success');
+    await loadRooms();
+    openRoom(res.room._id);
+  } catch (e) { errEl.textContent = e.message; }
+}
+
+async function joinRoom() {
+  const roomId = document.getElementById('join-room-id').value.trim().toUpperCase();
+  const errEl = document.getElementById('join-error');
+  if (!roomId) return errEl.textContent = 'Enter a valid Room ID';
+  try {
+    await api('/rooms/join', 'POST', { roomId });
+    closeModal('join-modal');
+    toast('Joined room!', 'success');
+    await loadRooms();
+    openRoom(roomId);
+  } catch (e) { errEl.textContent = e.message; }
+}
+
+async function lookupUser() {
+  const userId = document.getElementById('invite-uid-input').value.trim().toUpperCase();
+  const box = document.getElementById('found-user-box');
+  const err = document.getElementById('invite-error');
+  box.innerHTML = ''; err.textContent = '';
+  if (!userId) return;
+
+  try {
+    const res = await api(`/users/lookup/${userId}`);
+    foundUser = res.user;
+    box.innerHTML = `
+      <div class="found-user">
+        <div class="found-user-info">
+          <div class="fname">${esc(foundUser.displayName || foundUser.username)}</div>
+          <div class="fid">ID: ${foundUser.id}</div>
+        </div>
+        <button class="invite-send-btn" onclick="sendRoomInvite()">Add</button>
+      </div>
+    `;
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function sendRoomInvite() {
+  if (!foundUser || !currentRoom) return;
+  try {
+    await api('/rooms/invite', 'POST', { roomId: currentRoom._id, userId: foundUser.id });
+    closeModal('invite-modal');
+    toast('User added successfully!', 'success');
+    await loadRooms();
+  } catch (e) { document.getElementById('invite-error').textContent = e.message; }
+}
+
+function toggleOnlinePanel() { document.getElementById('online-panel').classList.toggle('open'); }
+function renderOnlinePanel() {
+  const panel = document.getElementById('online-list');
+  panel.innerHTML = Array.from(onlineUsersInRoom).map(user => `
+    <div class="online-user">
+      <div class="online-dot"></div>
+      <div>
+        <div class="online-name">${esc(user.displayName || user.username)}</div>
+        <div class="online-id">@${esc(user.username)}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
 function copyRoomId() {
-  if(!currentRoom) return;
+  if (!currentRoom) return;
   navigator.clipboard.writeText(currentRoom._id);
   toast('Room ID copied to clipboard!', 'success');
 }
 
 // ═══════════════════════════════════════════════════════
-//  BASE ENGINE INFRASTRUCTURE
+//  HELPERS
 // ═══════════════════════════════════════════════════════
 async function api(path, method = 'GET', body = null) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  
   const options = { method, headers };
   if (body) options.body = JSON.stringify(body);
-
+  
   const res = await fetch(`${API}${path}`, options);
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'API Request failed');
+  if (!res.ok) throw new Error(data.message || 'API request failed');
   return data;
 }
 
 function showPage(id) {
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
+  document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === id));
 }
 
 function toast(msg, type = '') {
@@ -1139,7 +1151,13 @@ function toast(msg, type = '') {
   setTimeout(() => t.classList.remove('show'), 3000);
 }
 
+function scrollToBottom() {
+  const body = document.getElementById('chat-body');
+  body.scrollTop = body.scrollHeight;
+}
+
 function userColor(id) {
+  if (!id) return ROOM_COLORS[0];
   let hash = 0;
   for (let i = 0; i < id.length; i++) hash = id.charCodeAt(i) + ((hash << 5) - hash);
   return ROOM_COLORS[Math.abs(hash) % ROOM_COLORS.length];
@@ -1149,10 +1167,6 @@ function esc(str) {
   if (!str) return '';
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
-
-document.addEventListener('click', () => {
-  document.querySelectorAll('.emoji-picker.open').forEach(p => p.classList.remove('open'));
-});
 </script>
 </body>
 </html>

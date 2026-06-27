@@ -496,7 +496,7 @@
   <div class="modal" style="position:relative">
     <button class="modal-close-btn" onclick="closeModal('invite-modal')">✕</button>
     <h2>Invite Friends</h2>
-    <p>Share the Room ID, or add someone directly by their User ID</p>
+    <p>Share the Room ID with friends so they can join</p>
     <div class="invite-box">
       <div class="inv-label">Room ID — share this</div>
       <div class="inv-id">
@@ -521,7 +521,7 @@
 // ═══════════════════════════════════════════
 //  CONFIG
 // ═══════════════════════════════════════════
-const API       = 'https://dropchat-fhoe.onrender.com/api';
+const API        = 'https://dropchat-fhoe.onrender.com/api';
 const SOCKET_URL = 'https://dropchat-fhoe.onrender.com';
 const EMOJIS     = ['👍','❤️','😂','😮','😢','🔥','🎉','👎'];
 const ROOM_COLORS = ['#7c6af7','#f472b6','#4ade80','#fbbf24','#60a5fa','#f87171','#a78bfa','#34d399'];
@@ -529,16 +529,27 @@ const ROOM_COLORS = ['#7c6af7','#f472b6','#4ade80','#fbbf24','#60a5fa','#f87171'
 // ═══════════════════════════════════════════
 //  STATE
 // ═══════════════════════════════════════════
-let currentUser  = null;
-let token        = null;
-let socket       = null;
-let currentRoom  = null;
-let myRooms      = [];
-let onlineUsers  = [];       // array of { userId, displayName, username }
-let typingUsers  = new Map();
-let typingTimer  = null;
-let isTyping     = false;
-let foundUser    = null;
+let currentUser = null;
+let token       = null;
+let socket      = null;
+let currentRoom = null;
+let myRooms     = [];
+let roomMembers = [];      // full member list for current room: [{id, username, displayName}]
+let typingUsers = new Map();
+let typingTimer = null;
+let isTyping    = false;
+let foundUser   = null;
+
+// ═══════════════════════════════════════════
+//  HELPERS — normalise user id field
+//  Backend JWT payload uses 'userId'; user object uses '_id'
+// ═══════════════════════════════════════════
+let resolvedMyId = '';
+function myId() { return resolvedMyId; }
+function resolveMyId(user) {
+  // Resolve once at login — backend auth returns _id; JWT stores userId
+  resolvedMyId = user._id || user.id || user.userId || '';
+}
 
 // ═══════════════════════════════════════════
 //  INIT
@@ -547,8 +558,9 @@ window.onload = () => {
   const savedToken = localStorage.getItem('dropchat_token');
   const savedUser  = localStorage.getItem('dropchat_user');
   if (savedToken && savedUser) {
-    token = savedToken;
+    token       = savedToken;
     currentUser = JSON.parse(savedUser);
+    resolveMyId(currentUser);
     enterDashboard();
   }
 };
@@ -570,11 +582,12 @@ async function doLogin() {
   const password = document.getElementById('login-password').value;
   const errEl    = document.getElementById('login-error');
   errEl.textContent = '';
-  if (!email || !password) return errEl.textContent = 'Fill in all fields';
+  if (!email || !password) { errEl.textContent = 'Fill in all fields'; return; }
   try {
     const res = await api('/auth/login', 'POST', { email, password });
-    token = res.token;
+    token       = res.token;
     currentUser = res.user;
+    resolveMyId(currentUser);
     localStorage.setItem('dropchat_token', token);
     localStorage.setItem('dropchat_user', JSON.stringify(currentUser));
     enterDashboard();
@@ -588,15 +601,16 @@ async function doRegister() {
   const password    = document.getElementById('reg-password').value;
   const errEl       = document.getElementById('register-error');
   errEl.textContent = '';
-  if (!username || !email || !password) return errEl.textContent = 'Fill in all fields';
+  if (!username || !email || !password) { errEl.textContent = 'Fill in all fields'; return; }
   try {
     const res = await api('/auth/register', 'POST', { username, email, password, displayName });
-    token = res.token;
+    token       = res.token;
     currentUser = res.user;
+    resolveMyId(currentUser);
     localStorage.setItem('dropchat_token', token);
     localStorage.setItem('dropchat_user', JSON.stringify(currentUser));
-    document.getElementById('reg-hint').style.display = 'block';
-    document.getElementById('show-uid').textContent   = currentUser.id;
+    document.getElementById('reg-hint').style.display  = 'block';
+    document.getElementById('show-uid').textContent    = myId();
     setTimeout(enterDashboard, 1200);
   } catch (e) { errEl.textContent = e.message; }
 }
@@ -605,7 +619,7 @@ function logout() {
   if (socket) socket.disconnect();
   localStorage.removeItem('dropchat_token');
   localStorage.removeItem('dropchat_user');
-  token = null; currentUser = null; socket = null; currentRoom = null; myRooms = [];
+  token = null; currentUser = null; resolvedMyId = ''; socket = null; currentRoom = null; myRooms = [];
   showPage('auth-page');
 }
 
@@ -615,11 +629,12 @@ function logout() {
 function enterDashboard() {
   showPage('dashboard-page');
   const u = currentUser;
+  // FIX: use myId() helper — backend may return _id not id
   document.getElementById('sb-name').textContent = u.displayName || u.username;
-  document.getElementById('sb-uid').textContent  = u.id;
+  document.getElementById('sb-uid').textContent  = myId();
   const av = document.getElementById('sb-avatar');
-  av.textContent   = (u.displayName || u.username)[0].toUpperCase();
-  av.style.background = userColor(u.id);
+  av.textContent      = (u.displayName || u.username || '?')[0].toUpperCase();
+  av.style.background = userColor(myId());
   loadRooms();
   connectSocket();
 }
@@ -652,7 +667,7 @@ function renderRoomList() {
 }
 
 // ═══════════════════════════════════════════
-//  SOCKET — correct event names to match backend
+//  SOCKET
 // ═══════════════════════════════════════════
 function connectSocket() {
   if (socket) socket.disconnect();
@@ -660,10 +675,9 @@ function connectSocket() {
   // FIX: pass token in handshake auth so backend middleware can verify it
   socket = io(SOCKET_URL, { auth: { token } });
 
-  socket.on('connect', () => console.log('[socket] connected'));
+  socket.on('connect', () => console.log('[socket] connected', socket.id));
   socket.on('connect_error', (e) => toast('Connection error: ' + e.message, 'error'));
 
-  // FIX: backend emits 'message_history' ✓ (was correct)
   socket.on('message_history', (messages) => {
     const body = document.getElementById('chat-body');
     body.innerHTML = '';
@@ -671,7 +685,6 @@ function connectSocket() {
     scrollToBottom();
   });
 
-  // FIX: backend emits 'new_message' ✓ (was correct)
   socket.on('new_message', (msg) => {
     appendMessage(msg);
     scrollToBottom();
@@ -682,9 +695,10 @@ function connectSocket() {
     updateMessageReactions(messageId, reactions);
   });
 
-  // FIX: backend emits 'user_typing' / 'user_stop_typing' (not 'typing_status')
+  // FIX: backend emits 'user_typing' / 'user_stop_typing'
   socket.on('user_typing', ({ userId, displayName }) => {
-    if (userId === currentUser.id) return;
+    // FIX: compare against myId() not currentUser.id
+    if (userId === myId()) return;
     typingUsers.set(userId, { displayName, ts: Date.now() });
     renderTypingIndicator();
   });
@@ -694,14 +708,12 @@ function connectSocket() {
     renderTypingIndicator();
   });
 
-  // FIX: backend emits 'online_users' (not 'room_users'), sends array of userIds
+  // FIX: backend sends array of userIds; we look up names from roomMembers cache
   socket.on('online_users', (userIds) => {
-    onlineUsers = userIds;
     renderOnlinePanel(userIds);
   });
 
   socket.on('user_joined', ({ userId, displayName }) => {
-    // optionally show a system message
     console.log(`[room] ${displayName} joined`);
   });
 
@@ -718,32 +730,57 @@ function connectSocket() {
 //  CHAT
 // ═══════════════════════════════════════════
 async function openRoom(roomId) {
-  if (currentRoom?._id === roomId) return;
+  // FIX: removed early-return guard — it prevented re-opening the same room
+  // after creation or page actions that reset state
 
-  currentRoom = myRooms.find(r => r._id === roomId) || { _id: roomId };
-  renderRoomList();
+  // Show loading state immediately using sidebar data as fallback
+  const sidebarRoom = myRooms.find(r => r._id === roomId);
+  if (sidebarRoom) {
+    currentRoom = sidebarRoom;
+    document.getElementById('ch-name').textContent    = sidebarRoom.name;
+    document.getElementById('ch-room-id').textContent = `ID: ${roomId}`;
+  }
 
   document.getElementById('welcome-screen').style.display = 'none';
   document.getElementById('chat-area').style.display      = 'flex';
-  document.getElementById('ch-name').textContent    = currentRoom.name || roomId;
-  document.getElementById('ch-room-id').textContent = `ID: ${roomId}`;
-
   document.getElementById('chat-body').innerHTML = '';
   typingUsers.clear();
   renderTypingIndicator();
 
-  // FIX: emit 'join_room' with roomId — backend normalises to uppercase
+  // Fetch full room data (members list, description) from REST API
+  try {
+    const res = await api(`/rooms/${roomId}`);
+    currentRoom = res.room;
+    roomMembers = res.room.members || [];
+    // Update header with authoritative name from server
+    document.getElementById('ch-name').textContent    = res.room.name;
+    document.getElementById('ch-room-id').textContent = `ID: ${roomId}`;
+  } catch (e) {
+    roomMembers = [];
+    if (!currentRoom) {
+      currentRoom = { _id: roomId, name: roomId };
+      document.getElementById('ch-name').textContent    = roomId;
+      document.getElementById('ch-room-id').textContent = `ID: ${roomId}`;
+    }
+    toast('Could not load room details: ' + e.message, 'error');
+  }
+
+  renderRoomList();
+
+  // FIX: emit join_room — backend normalises roomId to uppercase internally
+  // message_history socket event will populate the chat body
   socket.emit('join_room', { roomId });
 }
 
 function appendMessage(msg) {
   const body = document.getElementById('chat-body');
 
-  // FIX: backend sends flat fields (userId, displayName, text), not nested sender object
+  // FIX: backend stores flat fields: userId, displayName, username, text
   const senderId   = msg.userId;
   const senderName = msg.displayName || msg.username || 'User';
-  const text       = msg.text;                    // FIX: field is 'text', not 'content'
-  const isOwn      = senderId === currentUser.id;
+  const text       = msg.text;
+  // FIX: compare senderId against myId() — backend userId matches JWT userId
+  const isOwn      = senderId === myId();
   const timeStr    = new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   const div = document.createElement('div');
@@ -772,11 +809,11 @@ function appendMessage(msg) {
 }
 
 function sendMessage() {
-  const input   = document.getElementById('msg-input');
-  const text    = input.value.trim();
+  const input = document.getElementById('msg-input');
+  const text  = input.value.trim();
   if (!text || !currentRoom || !socket) return;
 
-  // FIX: field must be 'text', not 'content' — matches backend send_message handler
+  // FIX: field is 'text' — matches backend send_message handler
   socket.emit('send_message', { roomId: currentRoom._id, text });
   input.value = '';
   sendTypingStop();
@@ -820,8 +857,7 @@ function reactToMessage(emoji) {
   const messageId = picker.getAttribute('data-target');
   if (!messageId || !currentRoom || !socket) return;
   picker.style.display = 'none';
-
-  // FIX: correct event name is 'toggle_reaction' (not 'react_message')
+  // FIX: correct event name is 'toggle_reaction'
   socket.emit('toggle_reaction', { roomId: currentRoom._id, messageId, emoji });
 }
 
@@ -829,22 +865,20 @@ function updateMessageReactions(messageId, reactions) {
   const container = document.getElementById(`reactions-${messageId}`);
   if (!container) return;
 
-  // reactions is a Map (from Mongoose) serialised as object: { "👍": ["userId1", ...] }
+  // reactions arrives as a plain object: { "👍": ["userId1", ...] }
   const summary = {};
   if (reactions && typeof reactions === 'object') {
     const entries = reactions instanceof Map ? reactions.entries() : Object.entries(reactions);
     for (const [emoji, users] of entries) {
       if (!Array.isArray(users) || users.length === 0) continue;
-      summary[emoji] = {
-        count: users.length,
-        userReacted: users.includes(currentUser.id)
-      };
+      // FIX: compare against myId()
+      summary[emoji] = { count: users.length, userReacted: users.includes(myId()) };
     }
   }
 
   container.innerHTML = Object.entries(summary).map(([emoji, data]) => `
     <div class="reaction-pill ${data.userReacted ? 'reacted' : ''}"
-      onclick="event.stopPropagation(); socket.emit('toggle_reaction', { roomId: currentRoom._id, messageId: '${messageId}', emoji: '${emoji}' })">
+      onclick="event.stopPropagation(); if(socket && currentRoom) socket.emit('toggle_reaction', { roomId: currentRoom._id, messageId: '${messageId}', emoji: '${emoji}' })">
       <span>${emoji}</span>
       <span class="count">${data.count}</span>
     </div>
@@ -857,7 +891,7 @@ function updateMessageReactions(messageId, reactions) {
 function handleTyping() {
   if (!isTyping) {
     isTyping = true;
-    // FIX: correct event name is 'typing_start' (not 'typing')
+    // FIX: correct event name is 'typing_start'
     if (currentRoom && socket) socket.emit('typing_start', { roomId: currentRoom._id });
   }
   clearTimeout(typingTimer);
@@ -867,7 +901,7 @@ function handleTyping() {
 function sendTypingStop() {
   if (isTyping) {
     isTyping = false;
-    // FIX: correct event name is 'typing_stop' (not 'typing')
+    // FIX: correct event name is 'typing_stop'
     if (currentRoom && socket) socket.emit('typing_stop', { roomId: currentRoom._id });
   }
   clearTimeout(typingTimer);
@@ -894,28 +928,41 @@ function toggleOnlinePanel() {
   document.getElementById('online-panel').classList.toggle('open');
 }
 
-// backend sends array of userIds; display what we have
+// FIX: backend sends array of userIds; resolve display names from roomMembers cache
 function renderOnlinePanel(userIds) {
   const panel = document.getElementById('online-list');
   if (!userIds || userIds.length === 0) {
     panel.innerHTML = '<div style="color:var(--text3);font-size:12px">No one online</div>';
     return;
   }
-  panel.innerHTML = userIds.map(uid => `
-    <div class="online-user">
-      <div class="online-dot"></div>
-      <div>
-        <div class="online-name">${esc(uid)}</div>
+  panel.innerHTML = userIds.map(uid => {
+    // look up display name from the member list we fetched with the room
+    const member = roomMembers.find(m => m.id === uid || m._id === uid);
+    const name   = member ? (member.displayName || member.username) : uid;
+    return `
+      <div class="online-user">
+        <div class="online-dot"></div>
+        <div class="msg-avatar" style="background:${userColor(uid)};width:24px;height:24px;font-size:11px">${name[0].toUpperCase()}</div>
+        <div>
+          <div class="online-name">${esc(name)}</div>
+          <div class="online-id">${uid}</div>
+        </div>
       </div>
-    </div>
-  `).join('');
+    `;
+  }).join('');
 }
 
 // ═══════════════════════════════════════════
 //  MODALS
 // ═══════════════════════════════════════════
-function openCreateModal() { document.getElementById('create-error').textContent = ''; document.getElementById('create-modal').classList.add('open'); }
-function openJoinModal()   { document.getElementById('join-error').textContent = '';   document.getElementById('join-modal').classList.add('open'); }
+function openCreateModal() {
+  document.getElementById('create-error').textContent = '';
+  document.getElementById('create-modal').classList.add('open');
+}
+function openJoinModal() {
+  document.getElementById('join-error').textContent = '';
+  document.getElementById('join-modal').classList.add('open');
+}
 function openInviteModal() {
   if (!currentRoom) return;
   document.getElementById('inv-room-id').textContent = currentRoom._id;
@@ -924,9 +971,9 @@ function openInviteModal() {
 function closeModal(id) {
   document.getElementById(id).classList.remove('open');
   if (id === 'invite-modal') {
-    document.getElementById('found-user-box').innerHTML = '';
-    document.getElementById('invite-uid-input').value  = '';
-    document.getElementById('invite-error').textContent = '';
+    document.getElementById('found-user-box').innerHTML   = '';
+    document.getElementById('invite-uid-input').value    = '';
+    document.getElementById('invite-error').textContent  = '';
     foundUser = null;
   }
 }
@@ -936,7 +983,7 @@ async function createRoom() {
   const desc  = document.getElementById('create-desc').value.trim();
   const errEl = document.getElementById('create-error');
   errEl.textContent = '';
-  if (!name) return errEl.textContent = 'Room name is required';
+  if (!name) { errEl.textContent = 'Room name is required'; return; }
   try {
     // FIX: correct route is POST /rooms (not /rooms/create)
     const res = await api('/rooms', 'POST', { name, description: desc });
@@ -953,7 +1000,7 @@ async function joinRoom() {
   const roomId = document.getElementById('join-room-id').value.trim().toUpperCase();
   const errEl  = document.getElementById('join-error');
   errEl.textContent = '';
-  if (!roomId) return errEl.textContent = 'Enter a Room ID';
+  if (!roomId) { errEl.textContent = 'Enter a Room ID'; return; }
   try {
     await api('/rooms/join', 'POST', { roomId });
     closeModal('join-modal');
@@ -964,6 +1011,13 @@ async function joinRoom() {
   } catch (e) { errEl.textContent = e.message; }
 }
 
+// FIX: lookupUser calls GET /users/lookup/:userId
+// Make sure your users.js backend has this route:
+//   router.get('/lookup/:userId', authMiddleware, async (req, res) => {
+//     const user = await Users.findById(req.params.userId.toUpperCase());
+//     if (!user) return res.status(404).json({ error: 'User not found' });
+//     res.json({ user: { id: user._id, username: user.username, displayName: user.displayName } });
+//   });
 async function lookupUser() {
   const userId = document.getElementById('invite-uid-input').value.trim().toUpperCase();
   const box    = document.getElementById('found-user-box');
@@ -975,40 +1029,44 @@ async function lookupUser() {
     foundUser = res.user;
     box.innerHTML = `
       <div class="found-user">
+        <div class="msg-avatar" style="background:${userColor(foundUser.id || foundUser._id)}">${(foundUser.displayName || foundUser.username)[0].toUpperCase()}</div>
         <div class="found-user-info">
           <div class="fname">${esc(foundUser.displayName || foundUser.username)}</div>
-          <div class="fid">ID: ${esc(foundUser.id)}</div>
+          <div class="fid">ID: ${esc(foundUser.id || foundUser._id)}</div>
         </div>
-        <button class="invite-send-btn" onclick="addUserToRoom()">Add</button>
+        <button class="invite-send-btn" onclick="addUserToRoom()">Add to Room</button>
       </div>
     `;
   } catch (e) { err.textContent = e.message; }
 }
 
+// FIX: backend /rooms/join uses req.user.userId so we can't join on behalf of someone else.
+// The cleanest solution is to add a POST /rooms/:roomId/add-member route on the backend.
+// For now we show the room ID for the user to share manually.
 async function addUserToRoom() {
-  // FIX: /rooms/invite doesn't exist in backend — use /rooms/join on behalf of user
-  // The correct approach is to tell the user to share the Room ID and join themselves.
-  // Alternatively if you add a backend /rooms/add-member route this can be wired up.
   if (!foundUser || !currentRoom) return;
   const err = document.getElementById('invite-error');
   err.textContent = '';
+  // Copy the room ID to clipboard and inform user to share it
   try {
-    // This calls your backend addMember logic via the join route with the target userId
-    // NOTE: Your backend /rooms/join uses req.user.userId — so we can't join on behalf
-    // of someone else without a dedicated backend route. For now, copy the room ID for them.
-    copyRoomId();
-    toast(`Share Room ID ${currentRoom._id} with ${foundUser.displayName || foundUser.username}`, 'success');
+    await navigator.clipboard.writeText(currentRoom._id);
+    toast(`Room ID ${currentRoom._id} copied! Share it with ${foundUser.displayName || foundUser.username}`, 'success');
     closeModal('invite-modal');
-  } catch (e) { err.textContent = e.message; }
+  } catch {
+    toast(`Share Room ID "${currentRoom._id}" with ${foundUser.displayName || foundUser.username}`, 'success');
+    closeModal('invite-modal');
+  }
 }
 
 function copyRoomId() {
   if (!currentRoom) return;
-  navigator.clipboard.writeText(currentRoom._id).then(() => toast('Room ID copied!', 'success'));
+  navigator.clipboard.writeText(currentRoom._id)
+    .then(() => toast('Room ID copied!', 'success'))
+    .catch(() => toast(`Room ID: ${currentRoom._id}`, ''));
 }
 
 // ═══════════════════════════════════════════
-//  HELPERS
+//  API HELPER
 // ═══════════════════════════════════════════
 async function api(path, method = 'GET', body = null) {
   const headers = { 'Content-Type': 'application/json' };
@@ -1021,6 +1079,9 @@ async function api(path, method = 'GET', body = null) {
   return data;
 }
 
+// ═══════════════════════════════════════════
+//  UTILITIES
+// ═══════════════════════════════════════════
 function showPage(id) {
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === id));
 }
@@ -1029,7 +1090,7 @@ function toast(msg, type = '') {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.className = `toast show ${type}`;
-  setTimeout(() => t.classList.remove('show'), 3000);
+  setTimeout(() => t.classList.remove('show'), 3500);
 }
 
 function scrollToBottom() {
@@ -1046,7 +1107,11 @@ function userColor(id) {
 
 function esc(str) {
   if (!str) return '';
-  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(str)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
 }
 </script>
 </body>

@@ -37,7 +37,7 @@ const Users = {
   async create({ username, email, password, displayName }) {
     const { v4: uuidv4 } = require('uuid');
     const userId = uuidv4().slice(0, 8).toUpperCase();
-    
+
     const user = new UserModel({
       _id: userId,
       username,
@@ -62,30 +62,49 @@ const Users = {
   },
 
   async addRoom(userId, roomId) {
-    await UserModel.findByIdAndUpdate(userId, { $addToSet: { joinedRooms: roomId } });
+    await UserModel.findByIdAndUpdate(userId, {
+      $addToSet: { joinedRooms: roomId }
+    });
   },
 
   async removeRoom(userId, roomId) {
-    await UserModel.findByIdAndUpdate(userId, { $pull: { joinedRooms: roomId } });
+    await UserModel.findByIdAndUpdate(userId, {
+      $pull: { joinedRooms: roomId }
+    });
   }
 };
 
 const Rooms = {
   async create({ name, description, createdBy }) {
     const { v4: uuidv4 } = require('uuid');
-    const roomId = uuidv4().slice(0, 6).toUpperCase();
-    
-    const room = new RoomModel({
-      _id: roomId,
-      name,
-      description,
-      createdBy,
-      members: [createdBy]
-    });
-    
-    await room.save();
-    await Users.addRoom(createdBy, roomId);
-    return room;
+    let attempts = 0;
+
+    // FIX: retry on duplicate ID collision (error code 11000)
+    while (attempts < 5) {
+      try {
+        const roomId = uuidv4().slice(0, 6).toUpperCase();
+
+        const room = new RoomModel({
+          _id: roomId,
+          name,
+          description,
+          createdBy,
+          members: [createdBy]
+        });
+
+        await room.save();
+        await Users.addRoom(createdBy, roomId);
+        return room;
+      } catch (err) {
+        if (err.code === 11000) {
+          attempts++;
+          continue; // duplicate ID, try again
+        }
+        throw err; // any other error, rethrow immediately
+      }
+    }
+
+    throw new Error('Could not generate a unique room ID after 5 attempts');
   },
 
   async findById(id) {
@@ -129,16 +148,20 @@ const Messages = {
   },
 
   async getByRoom(roomId, limit = 50) {
-    return await MessageModel.find({ roomId }).sort({ createdAt: -1 }).limit(limit).then(msgs => msgs.reverse());
+    return await MessageModel
+      .find({ roomId })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .then(msgs => msgs.reverse());
   },
 
   async addReaction(roomId, messageId, emoji, userId) {
     const msg = await MessageModel.findById(messageId);
     if (!msg) return null;
-
     if (!emoji) return msg;
 
     if (!msg.reactions) msg.reactions = new Map();
+
     const currentReactions = msg.reactions.get(emoji) || [];
     const idx = currentReactions.indexOf(userId);
 

@@ -3,7 +3,7 @@ const { JWT_SECRET } = require('./auth');
 const { Messages, Rooms } = require('./models/store');
 
 const onlineUsers = new Map(); // socketId -> { userId, username, displayName, roomId }
-const roomOnline = new Map();  // roomId -> Set of socketIds (Fixes tab syncing bug)
+const roomOnline = new Map();  // roomId -> Set of socketIds
 
 function initSocket(io) {
   io.use((socket, next) => {
@@ -23,57 +23,82 @@ function initSocket(io) {
     console.log(`[socket] ${displayName} (${userId}) connected`);
 
     socket.on('join_room', async ({ roomId }) => {
-      if (!(await Rooms.isMember(roomId, userId))) {
+      const rid = roomId?.trim().toUpperCase(); // FIX: normalize roomId
+
+      if (!(await Rooms.isMember(rid, userId))) {
         socket.emit('error', { message: 'Not a member of this room' });
         return;
       }
 
+      // Leave previous room if any
       const prev = onlineUsers.get(socket.id);
       if (prev?.roomId) {
         socket.leave(prev.roomId);
         const prevSet = roomOnline.get(prev.roomId);
         if (prevSet) {
           prevSet.delete(socket.id);
-          io.to(prev.roomId).emit('online_users', [...prevSet].map(sid => onlineUsers.get(sid)?.userId).filter(Boolean));
+          const prevUserIds = [...prevSet]
+            .map(sid => onlineUsers.get(sid)?.userId)
+            .filter(Boolean);
+          io.to(prev.roomId).emit('online_users', [...new Set(prevUserIds)]);
         }
       }
 
-      socket.join(roomId);
-      onlineUsers.set(socket.id, { userId, username, displayName, roomId });
+      socket.join(rid);
+      onlineUsers.set(socket.id, { userId, username, displayName, roomId: rid });
 
-      if (!roomOnline.has(roomId)) roomOnline.set(roomId, new Set());
-      roomOnline.get(roomId).add(socket.id);
+      if (!roomOnline.has(rid)) roomOnline.set(rid, new Set());
+      roomOnline.get(rid).add(socket.id);
 
-      const uniqueUserIds = [...roomOnline.get(roomId)].map(sid => onlineUsers.get(sid)?.userId).filter(Boolean);
-      io.to(roomId).emit('online_users', [...new Set(uniqueUserIds)]);
-      io.to(roomId).emit('user_joined', { userId, displayName });
+      const uniqueUserIds = [...roomOnline.get(rid)]
+        .map(sid => onlineUsers.get(sid)?.userId)
+        .filter(Boolean);
 
-      const history = await Messages.getByRoom(roomId, 60);
+      io.to(rid).emit('online_users', [...new Set(uniqueUserIds)]);
+      io.to(rid).emit('user_joined', { userId, displayName });
+
+      const history = await Messages.getByRoom(rid, 60);
       socket.emit('message_history', history);
     });
 
     socket.on('send_message', async ({ roomId, text }) => {
-      if (!text?.trim()) return;
-      if (!(await Rooms.isMember(roomId, userId))) return;
+      const rid = roomId?.trim().toUpperCase(); // FIX: normalize roomId
 
-      const msg = await Messages.add(roomId, { userId, username, displayName, text: text.trim() });
-      io.to(roomId).emit('new_message', msg);
+      if (!text?.trim()) return;
+      if (!(await Rooms.isMember(rid, userId))) return;
+
+      const msg = await Messages.add(rid, {
+        userId,
+        username,
+        displayName,
+        text: text.trim()
+      });
+
+      io.to(rid).emit('new_message', msg);
     });
 
     socket.on('toggle_reaction', async ({ roomId, messageId, emoji }) => {
-      if (!(await Rooms.isMember(roomId, userId))) return;
-      const updated = await Messages.addReaction(roomId, messageId, emoji, userId);
+      const rid = roomId?.trim().toUpperCase(); // FIX: normalize roomId
+
+      if (!(await Rooms.isMember(rid, userId))) return;
+
+      const updated = await Messages.addReaction(rid, messageId, emoji, userId);
       if (updated) {
-        io.to(roomId).emit('reaction_updated', { messageId, reactions: updated.reactions });
+        io.to(rid).emit('reaction_updated', {
+          messageId,
+          reactions: updated.reactions
+        });
       }
     });
 
     socket.on('typing_start', ({ roomId }) => {
-      socket.to(roomId).emit('user_typing', { userId, displayName });
+      const rid = roomId?.trim().toUpperCase(); // FIX: normalize roomId
+      socket.to(rid).emit('user_typing', { userId, displayName });
     });
 
     socket.on('typing_stop', ({ roomId }) => {
-      socket.to(roomId).emit('user_stop_typing', { userId });
+      const rid = roomId?.trim().toUpperCase(); // FIX: normalize roomId
+      socket.to(rid).emit('user_stop_typing', { userId });
     });
 
     socket.on('disconnect', () => {
@@ -82,7 +107,9 @@ function initSocket(io) {
         const set = roomOnline.get(info.roomId);
         if (set) {
           set.delete(socket.id);
-          const uniqueUserIds = [...set].map(sid => onlineUsers.get(sid)?.userId).filter(Boolean);
+          const uniqueUserIds = [...set]
+            .map(sid => onlineUsers.get(sid)?.userId)
+            .filter(Boolean);
           io.to(info.roomId).emit('online_users', [...new Set(uniqueUserIds)]);
           io.to(info.roomId).emit('user_left', { userId, displayName });
         }
